@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: sudo apt-get update -q && sudo apt-get install -y -q ghostscript
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: docker build -t canvium-ps-worker .
+      - name: Smoke test
+        run: |
+          docker run -d --rm -p 8080:8080 --name ps canvium-ps-worker
+          for i in $(seq 1 20); do curl -sf localhost:8080/health && break; sleep 1; done
+          printf '%%!PS-Adobe-3.0 EPSF-3.0\n%%%%BoundingBox: 0 0 100 50\n1 0 0 setrgbcolor 0 0 100 50 rectfill showpage\n' > t.eps
+          curl -sf -X POST --data-binary @t.eps localhost:8080/convert -o t.pdf
+          head -c 5 t.pdf | grep -q '%PDF-'
+          docker stop ps
+      - name: Publish to ghcr.io
+        if: github.event_name == 'push'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          IMAGE=ghcr.io/pkdigital/canvium-ps-worker
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then TAG="${GITHUB_REF#refs/tags/v}"; else TAG=main; fi
+          docker tag canvium-ps-worker "$IMAGE:$TAG"
+          docker push "$IMAGE:$TAG"
