@@ -56,6 +56,26 @@ app.post("/pdf/render", async (c) => {
   }
 });
 
+/**
+ * POST PDF bytes; returns JSON { png (base64), text, pages, widthPt, heightPt } for one page:
+ * the image and the page's text layer in one call. Query as /pdf/render. 422 as /pdf/render.
+ */
+app.post("/pdf/preview", async (c) => {
+  const page = Number(c.req.query("page") ?? 1);
+  const size = Number(c.req.query("size") ?? 2048);
+  if (!Number.isInteger(page) || page < 1) return c.json({ error: "page must be a positive integer" }, 400);
+  if (!Number.isInteger(size) || size < 16 || size > 4096) return c.json({ error: "size must be 16-4096" }, 400);
+  const bytes = new Uint8Array(await c.req.arrayBuffer());
+  if (bytes.length === 0) return c.json({ error: "empty body" }, 400);
+  try {
+    const out = await renderPdfPage(bytes, page, size, true);
+    return c.json({ png: out.png.toString("base64"), text: out.text ?? "", pages: out.pages, widthPt: out.widthPt, heightPt: out.heightPt }, 200, { "x-source": SOURCE });
+  } catch (err) {
+    if (err instanceof ConvertError) return c.json({ error: err.message }, 422);
+    throw err;
+  }
+});
+
 app.onError((err, c) => {
   console.error(err);
   return c.json({ error: "conversion failed", detail: err.message }, 500);

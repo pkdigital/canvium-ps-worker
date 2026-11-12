@@ -112,6 +112,15 @@ describe.skipIf(!HAS_GS || !HAS_MUTOOL)("pdf render", () => {
     expect((await render(pdf, "?page=3")).status).toBe(422);
   }, 30_000);
 
+  it("returns the page image and its text layer together", async () => {
+    const res = await app.request("/pdf/preview?size=300", { method: "POST", body: await pdfOf(EPS) });
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { png: string; text: string; pages: number; widthPt: number; heightPt: number };
+    expect(json).toMatchObject({ pages: 1, widthPt: 200, heightPt: 100 });
+    expect(json.text).toContain("Canvium EPS");
+    expect(Buffer.from(json.png, "base64").subarray(1, 4).toString("latin1")).toBe("PNG");
+  }, 30_000);
+
   it("explains a PDF it can't open", async () => {
     const res = await render(new TextEncoder().encode("not a pdf at all"));
     expect(res.status).toBe(422);

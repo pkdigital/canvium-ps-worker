@@ -11,10 +11,14 @@ import { ConvertError } from "./convert.ts";
 const run = promisify(execFile);
 
 const TIMEOUT_MS = Number(process.env.MUTOOL_TIMEOUT_MS ?? 60_000);
+/** Longest page text returned; a page of dense text is a few thousand characters. */
+const MAX_TEXT_CHARS = 20_000;
 
 export interface PdfPage {
   /** PNG of the page, white background, longest side `longSide` pixels at most. */
   png: Buffer;
+  /** The page's text layer (empty for scanned pages), when asked for. At most MAX_TEXT_CHARS. */
+  text?: string;
   /** Number of pages in the document. */
   pages: number;
   /** Size of the rendered page in points (1/72 inch), after its /Rotate. */
@@ -39,7 +43,7 @@ function fail(err: unknown, what: string): never {
  * 50-megapixel photo renders in well under a second where other renderers take 10 s or more.
  * The container has no network access; mutool reads only the file it is given.
  */
-export async function renderPdfPage(bytes: Uint8Array, page = 1, longSide = 2048): Promise<PdfPage> {
+export async function renderPdfPage(bytes: Uint8Array, page = 1, longSide = 2048, withText = false): Promise<PdfPage> {
   const dir = await mkdtemp(join(tmpdir(), "pdf-"));
   try {
     const input = join(dir, "in.pdf");
@@ -71,15 +75,26 @@ export async function renderPdfPage(bytes: Uint8Array, page = 1, longSide = 2048
     if (page > pages) throw new ConvertError(`PDF has ${pages} pages; page ${page} requested`);
     if (!(widthPt > 0 && heightPt > 0)) throw new ConvertError(`PDF page ${page} has no size`);
 
+    const textFile = join(dir, "out.txt");
     try {
       // -w/-h fit the page inside longSide x longSide, keeping its shape. -A 8: full antialiasing.
-      await run("mutool", ["draw", "-q", "-A", "8", "-c", "rgb", "-w", String(longSide), "-h", String(longSide), "-F", "png", "-o", output, input, String(page)], opts);
+      // The text layer (if asked) is extracted at the same time, by a second mutool process.
+      await Promise.all([
+        run("mutool", ["draw", "-q", "-A", "8", "-c", "rgb", "-w", String(longSide), "-h", String(longSide), "-F", "png", "-o", output, input, String(page)], opts),
+        withText ? run("mutool", ["draw", "-q", "-F", "txt", "-o", textFile, input, String(page)], opts) : null,
+      ]);
     } catch (err) {
       fail(err, "rendering the PDF");
     }
     const png = await readFile(output).catch(() => null);
     if (!png || png.length < 8) throw new ConvertError(`PDF page ${page} produced no image`);
-    return { png, pages, widthPt, heightPt };
+    let text: string | undefined;
+    if (withText) {
+      const raw = await readFile(textFile, "utf8").catch(() => "");
+      // Collapse the layout whitespace mutool keeps, but keep paragraph breaks.
+      text = raw.replace(/\f/g, "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim().slice(0, MAX_TEXT_CHARS);
+    }
+    return { png, pages, widthPt, heightPt, text };
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
