@@ -1,10 +1,11 @@
-# canvium-ps-worker: PostScript/EPS -> PDF over HTTP.
-# Ghostscript is Debian's unmodified package, run as a separate program (never linked).
-# Its source: `apt-get source ghostscript` (Debian bookworm) or https://ghostscript.com/releases/
+# canvium-ps-worker: PostScript/EPS -> PDF, and PDF page -> PNG, over HTTP.
+# Ghostscript and MuPDF are Debian's unmodified packages, run as separate programs (never linked).
+# Sources: `apt-get source ghostscript mupdf` (Debian bookworm), https://ghostscript.com/releases/
+# and https://mupdf.com/releases/
 FROM node:22-bookworm-slim
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates tini ghostscript \
+  && apt-get install -y --no-install-recommends ca-certificates tini ghostscript mupdf-tools \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

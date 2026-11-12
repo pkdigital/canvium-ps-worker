@@ -74,3 +74,52 @@ describe.skipIf(!HAS_GS)("ps worker", () => {
     expect((await convert("")).status).toBe(400);
   });
 });
+
+let HAS_MUTOOL = false;
+try {
+  execFileSync("mutool", ["-v"], { stdio: "ignore" });
+  HAS_MUTOOL = true;
+} catch {
+  // tests skip without MuPDF (CI and the Docker image install it)
+}
+
+describe.skipIf(!HAS_GS || !HAS_MUTOOL)("pdf render", () => {
+  const pdfOf = async (ps: string) => new Uint8Array(await (await convert(ps)).arrayBuffer());
+  const render = (pdf: Uint8Array, query = "") => app.request(`/pdf/render${query}`, { method: "POST", body: pdf });
+
+  it("reports its MuPDF version", async () => {
+    expect(await (await app.request("/health")).json()).toMatchObject({ mupdf: expect.stringMatching(/^\d+\.\d+/) });
+  });
+
+  it("renders page one as a PNG fitted to the requested size, with page count and size", async () => {
+    const res = await render(await pdfOf(EPS), "?size=400");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/png");
+    expect(res.headers.get("x-pages")).toBe("1");
+    expect(res.headers.get("x-page-width-pt")).toBe("200");
+    expect(res.headers.get("x-page-height-pt")).toBe("100");
+    const png = Buffer.from(await res.arrayBuffer());
+    expect(png.subarray(1, 4).toString("latin1")).toBe("PNG");
+    // IHDR: width and height at bytes 16-23. 200x100 pt fitted into 400x400 px.
+    expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([400, 200]);
+  }, 30_000);
+
+  it("counts pages and renders a later page on request", async () => {
+    const pdf = await pdfOf(TWO_PAGE_PS);
+    const res = await render(pdf, "?page=2&size=256");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-pages")).toBe("2");
+    expect((await render(pdf, "?page=3")).status).toBe(422);
+  }, 30_000);
+
+  it("explains a PDF it can't open", async () => {
+    const res = await render(new TextEncoder().encode("not a pdf at all"));
+    expect(res.status).toBe(422);
+    expect(await res.json()).toMatchObject({ error: expect.stringMatching(/could not be rendered/) });
+  });
+
+  it("validates its query", async () => {
+    expect((await render(new Uint8Array([1]), "?size=5")).status).toBe(400);
+    expect((await render(new Uint8Array([1]), "?page=0")).status).toBe(400);
+  });
+});

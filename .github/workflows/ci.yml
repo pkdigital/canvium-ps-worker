@@ -19,7 +19,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: sudo apt-get update -q && sudo apt-get install -y -q ghostscript
+      - run: sudo apt-get update -q && sudo apt-get install -y -q ghostscript mupdf-tools
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
@@ -38,6 +38,8 @@ jobs:
           printf '%%!PS-Adobe-3.0 EPSF-3.0\n%%%%BoundingBox: 0 0 100 50\n1 0 0 setrgbcolor 0 0 100 50 rectfill showpage\n' > t.eps
           curl -sf -X POST --data-binary @t.eps localhost:8080/convert -o t.pdf
           head -c 5 t.pdf | grep -q '%PDF-'
+          curl -sf -X POST --data-binary @t.pdf 'localhost:8080/pdf/render?size=64' -o t.png
+          head -c 4 t.png | grep -q 'PNG'
           docker stop ps
       - name: Publish to ghcr.io
         if: github.event_name == 'push'

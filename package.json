@@ -1,10 +1,10 @@
 {
   "name": "canvium-ps-worker",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "license": "AGPL-3.0-only",
-  "description": "HTTP wrapper that converts PostScript and EPS to PDF by running the unmodified Ghostscript gs binary.",
+  "description": "HTTP wrapper that converts PostScript and EPS to PDF with the unmodified Ghostscript gs binary, and renders PDF pages with the unmodified MuPDF mutool binary.",
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "node --experimental-strip-types src/server.ts",
