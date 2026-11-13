@@ -4,7 +4,7 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { ConvertError, ghostscriptVersion, postscriptToPdf } from "./convert.ts";
-import { mupdfVersion, renderPdfPage } from "./pdf.ts";
+import { mupdfVersion, renderPdfPage, renderPdfPages } from "./pdf.ts";
 
 const MAX_BYTES = Number(process.env.MAX_BYTES ?? 200 * 1024 * 1024);
 const SOURCE = "https://github.com/pkdigital/canvium-ps-worker";
@@ -74,6 +74,52 @@ app.post("/pdf/preview", async (c) => {
     if (err instanceof ConvertError) return c.json({ error: err.message }, 422);
     throw err;
   }
+});
+
+/** Most pages one /pdf/pages call draws. */
+const MAX_PAGES = 500;
+
+/**
+ * POST PDF bytes; draws several pages in one pass and streams them back as they are finished,
+ * as NDJSON: one line per page, `{ page, png (base64) }` or `{ page, error }` for a page that
+ * couldn't be drawn, then `{ done: true, pages }` (the document's page count). Query: pages (a
+ * comma-separated list, e.g. 2,3,5; pages past the end are left out), size (as /pdf/render).
+ * 422 JSON `{ error }` when the PDF can't be opened. A response without the done line was cut
+ * short (treat the missing pages as failed).
+ */
+app.post("/pdf/pages", async (c) => {
+  const pages = (c.req.query("pages") ?? "").split(",").map(Number);
+  const size = Number(c.req.query("size") ?? 2048);
+  if (!pages.length || pages.length > MAX_PAGES || !pages.every((p) => Number.isInteger(p) && p >= 1)) {
+    return c.json({ error: `pages must be a comma-separated list of 1 to ${MAX_PAGES} page numbers` }, 400);
+  }
+  if (!Number.isInteger(size) || size < 16 || size > 4096) return c.json({ error: "size must be 16-4096" }, 400);
+  const bytes = new Uint8Array(await c.req.arrayBuffer());
+  if (bytes.length === 0) return c.json({ error: "empty body" }, 400);
+  let drawn: Awaited<ReturnType<typeof renderPdfPages>>;
+  try {
+    drawn = await renderPdfPages(bytes, pages, size);
+  } catch (err) {
+    if (err instanceof ConvertError) return c.json({ error: err.message }, 422);
+    throw err;
+  }
+  const { total, images } = drawn;
+  const line = (o: unknown) => new TextEncoder().encode(`${JSON.stringify(o)}\n`);
+  // Pulled one page at a time, so mutool's output waits on a slow reader rather than piling up here.
+  const body = new ReadableStream<Uint8Array>({
+    async pull(ctrl) {
+      const next = await images.next();
+      if (next.done) {
+        ctrl.enqueue(line({ done: true, pages: total }));
+        ctrl.close();
+      } else if ("png" in next.value) ctrl.enqueue(line({ page: next.value.page, png: next.value.png.toString("base64") }));
+      else ctrl.enqueue(line(next.value));
+    },
+    async cancel() {
+      await images.return(undefined);
+    },
+  });
+  return c.body(body, 200, { "content-type": "application/x-ndjson", "x-pages": String(total), "x-source": SOURCE });
 });
 
 app.onError((err, c) => {

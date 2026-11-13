@@ -112,6 +112,35 @@ describe.skipIf(!HAS_GS || !HAS_MUTOOL)("pdf render", () => {
     expect((await render(pdf, "?page=3")).status).toBe(422);
   }, 30_000);
 
+  it("streams several pages from one pass, leaving out pages past the end", async () => {
+    const ps = `%!PS-Adobe-3.0\n%%Pages: 4\n${[1, 2, 3, 4].map((n) => `%%Page: ${n} ${n}\n/Helvetica findfont 36 scalefont setfont 72 700 moveto (Page ${n}) show showpage\n`).join("")}%%EOF\n`;
+    const res = await app.request("/pdf/pages?pages=4,2,2,9&size=128", { method: "POST", body: await pdfOf(ps) });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/x-ndjson");
+    const lines = (await res.text()).trim().split("\n").map((l) => JSON.parse(l) as { page?: number; png?: string; error?: string; done?: boolean; pages?: number });
+    expect(lines.map((l) => l.page ?? "done")).toEqual([2, 4, "done"]);
+    expect(lines.at(-1)).toEqual({ done: true, pages: 4 });
+    for (const l of lines.slice(0, 2)) {
+      const png = Buffer.from(l.png!, "base64");
+      expect(png.subarray(1, 4).toString("latin1")).toBe("PNG");
+      expect(Math.max(png.readUInt32BE(16), png.readUInt32BE(20))).toBe(128);
+    }
+  }, 30_000);
+
+  it("refuses bad page lists and PDFs it can't open", async () => {
+    const pdf = await pdfOf(TWO_PAGE_PS);
+    for (const q of ["", "?pages=0", "?pages=a", "?pages=1,", "?pages=1&size=5"]) {
+      expect((await app.request(`/pdf/pages${q}`, { method: "POST", body: pdf })).status, q).toBe(400);
+    }
+    const bad = await app.request("/pdf/pages?pages=1", { method: "POST", body: new TextEncoder().encode("not a pdf") });
+    expect(bad.status).toBe(422);
+  }, 30_000);
+
+  it("ends with only the done line when every page is past the end", async () => {
+    const res = await app.request("/pdf/pages?pages=7,8", { method: "POST", body: await pdfOf(TWO_PAGE_PS) });
+    expect((await res.text()).trim()).toBe(JSON.stringify({ done: true, pages: 2 }));
+  }, 30_000);
+
   it("returns the page image and its text layer together", async () => {
     const res = await app.request("/pdf/preview?size=300", { method: "POST", body: await pdfOf(EPS) });
     expect(res.status).toBe(200);

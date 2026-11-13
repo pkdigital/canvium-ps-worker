@@ -27,6 +27,7 @@ Public License v3, because it ships Ghostscript and MuPDF (both AGPL-3.0).
 | `POST` | `/convert` | PostScript or EPS bytes | `200 application/pdf`; `422` JSON `{ error }` if the file can't be converted; `413` if over the size limit |
 | `POST` | `/pdf/render?page=1&size=2048` | PDF bytes | `200 image/png` of the page, longest side `size` px (16-4096), with headers `x-pages`, `x-page-width-pt`, `x-page-height-pt`; `422` JSON `{ error }` if the PDF can't be rendered (damaged, password protected, no such page) |
 | `POST` | `/pdf/preview?page=1&size=2048` | PDF bytes | `200` JSON `{ png (base64), text, pages, widthPt, heightPt }`: the page image and its text layer (empty for scanned pages, at most 20,000 characters) in one call; errors as `/pdf/render` |
+| `POST` | `/pdf/pages?pages=2,3,5&size=2048` | PDF bytes | `200 application/x-ndjson`: several pages drawn in one pass and streamed back as each is finished, one line per page `{ page, png (base64) }` (or `{ page, error }` for a page that couldn't be drawn), then `{ done: true, pages }`; pages past the end are left out; a stream without the `done` line was cut short. `422` JSON `{ error }` if the PDF can't be opened |
 | `GET` | `/health` | | `{ ok, ghostscript, mupdf, source }` |
 
 EPS pages are cropped to the file's `%%BoundingBox`. Multi-page PostScript keeps every page.

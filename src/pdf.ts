@@ -1,7 +1,8 @@
 // Copyright (C) 2026 PK Digital
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -96,6 +97,82 @@ export async function renderPdfPage(bytes: Uint8Array, page = 1, longSide = 2048
     }
     return { png, pages, widthPt, heightPt, text };
   } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/** One page from renderPdfPages: its PNG, or why it couldn't be drawn. */
+export type PageImage = { page: number; png: Buffer } | { page: number; error: string };
+
+/**
+ * Several pages of a PDF, drawn by one `mutool draw` over the page list, so the file is written
+ * and opened once however many pages are asked for (as ImageMagick's frame range did, with
+ * Ghostscript underneath). Pages past the end are left out. Resolves once the PDF has been
+ * opened (ConvertError if it can't be: damaged, password protected); `images` then yields each
+ * page, in order, as soon as mutool has finished it, so callers can stream them on while later
+ * pages are still being drawn. A page that can't be drawn yields an error and the rest carry on.
+ * Stopping early (return() on the iterator) kills mutool and deletes the files.
+ */
+export async function renderPdfPages(bytes: Uint8Array, pages: number[], longSide = 2048): Promise<{ total: number; images: AsyncGenerator<PageImage> }> {
+  const dir = await mkdtemp(join(tmpdir(), "pdf-"));
+  const input = join(dir, "in.pdf");
+  let total: number;
+  try {
+    await writeFile(input, bytes);
+    try {
+      const count = await run("mutool", ["show", "-b", input, "trailer/Root/Pages/Count"], { timeout: TIMEOUT_MS, killSignal: "SIGKILL", cwd: dir });
+      total = Number.parseInt(count.stdout.trim(), 10);
+    } catch (err) {
+      fail(err, "reading the PDF");
+    }
+    if (!(total >= 1)) throw new ConvertError("PDF has no pages");
+  } catch (err) {
+    await rm(dir, { recursive: true, force: true });
+    throw err;
+  }
+  const list = [...new Set(pages)].filter((p) => p >= 1 && p <= total).sort((a, b) => a - b);
+  return { total, images: drawPages(dir, input, list, longSide) };
+}
+
+async function* drawPages(dir: string, input: string, list: number[], longSide: number): AsyncGenerator<PageImage> {
+  const file = (page: number) => join(dir, `p${page}.png`);
+  let exited = false;
+  let stderr = "";
+  const child = list.length
+    ? spawn("mutool", ["draw", "-q", "-A", "8", "-c", "rgb", "-w", String(longSide), "-h", String(longSide), "-F", "png", "-o", join(dir, "p%d.png"), input, list.join(",")], {
+        cwd: dir,
+        stdio: ["ignore", "ignore", "pipe"],
+      })
+    : null;
+  child?.stderr?.on("data", (d: Buffer) => (stderr = (stderr + d.toString()).slice(-4000)));
+  child?.on("close", () => (exited = true));
+  child?.on("error", (err) => ((stderr += String(err)), (exited = true)));
+  try {
+    let lastProgress = Date.now();
+    for (let i = 0; i < list.length; ) {
+      const page = list[i]!;
+      // mutool writes the pages in order: a page is complete once the next one has been started, or mutool has exited.
+      if (exited || (i + 1 < list.length && existsSync(file(list[i + 1]!)))) {
+        const png = await readFile(file(page)).catch(() => null);
+        await rm(file(page), { force: true });
+        if (png && png.length >= 8 && png.subarray(1, 4).toString("latin1") === "PNG") yield { page, png };
+        else {
+          const why = stderr.split("\n").find((l) => /error/i.test(l))?.trim();
+          yield { page, error: `PDF page ${page} produced no image${why ? `: ${why.slice(0, 200)}` : ""}` };
+        }
+        i++;
+        lastProgress = Date.now();
+        continue;
+      }
+      if (Date.now() - lastProgress > TIMEOUT_MS) {
+        child?.kill("SIGKILL");
+        for (const p of list.slice(i)) yield { page: p, error: `PDF page ${p} took longer than ${TIMEOUT_MS / 1000}s` };
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  } finally {
+    if (child && !exited) child.kill("SIGKILL");
     await rm(dir, { recursive: true, force: true });
   }
 }
